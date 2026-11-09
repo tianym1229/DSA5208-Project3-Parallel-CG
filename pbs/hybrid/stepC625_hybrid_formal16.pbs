@@ -1,0 +1,181 @@
+#!/bin/bash
+#PBS -P personal-tianyimeng
+#PBS -N cg_C625_formal16
+#PBS -l select=1:ncpus=16:mpiprocs=16:ompthreads=1:mem=16gb:node_pool=cpu_node
+#PBS -l walltime=01:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+cd "$PBS_O_WORKDIR"
+
+module load openmpi/gcc/64/4.1.8
+
+echo "===== BUILD EXECUTABLE ====="
+make -j1 cg_hybrid
+test -x cg_hybrid
+echo "===== BUILD COMPLETED ====="
+
+MPI_PREFIX=/cm/shared/apps/openmpi4/gcc/4.1.8
+
+export OMP_DYNAMIC=FALSE
+export OMP_PROC_BIND=close
+export OMP_PLACES=cores
+
+OUTDIR="results/formal/hybrid/stepC625_hybrid_formal16"
+mkdir -p "$OUTDIR"
+
+JOBID="${PBS_JOBID%%.*}"
+OUT="$OUTDIR/formal_measurements_${JOBID}.csv"
+ENVFILE="$OUTDIR/environment_${JOBID}.txt"
+
+if [ -e "$OUT" ]; then
+    echo "ERROR: Output already exists"
+    exit 1
+fi
+
+echo "dim,grid,n,nnz,solution,ranks,iterations,runtime_s,relative_residual,relative_error,converged,halo_s,spmv_s,allreduce_s,vector_s,comm,fixed_iters,validation_s,omp_threads,phase,repeat" > "$OUT"
+
+{
+    echo "===== EXPERIMENT ENVIRONMENT ====="
+    date
+    hostname
+    echo "PBS_JOBID=$PBS_JOBID"
+    echo "===== NODE ALLOCATION ====="
+    sort "$PBS_NODEFILE" | uniq -c
+    echo "===== CPU INFORMATION ====="
+    lscpu
+    echo "===== CPU AFFINITY ====="
+    grep Cpus_allowed_list /proc/self/status
+    echo "===== MPI VERSION ====="
+    mpirun --version
+    echo "===== EXECUTABLE CHECKSUM ====="
+    sha256sum cg_hybrid
+} > "$ENVFILE"
+
+echo "===== HYBRID FORMAL 16 ====="
+echo "CSV=$OUT"
+echo "ENVIRONMENT=$ENVFILE"
+
+echo "===== MPI MAPPING PRECHECK ====="
+
+for config in "16 1" "8 2" "4 4"; do
+    read -r ranks threads <<< "$config"
+    export OMP_NUM_THREADS="$threads"
+
+    echo "MAPPING ranks=$ranks threads=$threads"
+
+    mpirun --prefix "$MPI_PREFIX" \
+        -np "$ranks" \
+        --map-by "slot:PE=$threads" \
+        --bind-to core \
+        --report-bindings \
+        bash -c 'echo "RANK=$OMPI_COMM_WORLD_RANK THREADS=$OMP_NUM_THREADS"; grep Cpus_allowed_list /proc/self/status'
+done
+
+echo "===== MPI MAPPING PRECHECK PASSED ====="
+
+run_case() {
+    local dim="$1"
+    local grid="$2"
+    local ranks="$3"
+    local threads="$4"
+    local comm="$5"
+    local phase="$6"
+    local repeat="$7"
+
+    export OMP_NUM_THREADS="$threads"
+
+    echo "CASE dim=$dim grid=$grid ranks=$ranks threads=$threads comm=$comm phase=$phase repeat=$repeat"
+
+    local result
+    result=$(mpirun --prefix "$MPI_PREFIX" \
+        -np "$ranks" \
+        --map-by "slot:PE=$threads" \
+        --bind-to core \
+        ./cg_hybrid \
+        --dim "$dim" \
+        --grid "$grid" \
+        --solution benchmark \
+        --comm "$comm" \
+        --tol 1e-8 \
+        --max-iters 10000)
+
+    local row
+    row=$(printf '%s\n' "$result" | tail -n 1)
+
+    python3 - "$row" "$dim" "$grid" "$ranks" "$threads" "$comm" <<'VALIDATE'
+import sys
+import math
+
+row = sys.argv[1].split(",")
+dim, grid, ranks, threads = map(int, sys.argv[2:6])
+comm = sys.argv[6]
+
+assert len(row) == 19
+assert int(row[0]) == dim
+assert int(row[1]) == grid
+assert int(row[2]) == grid ** dim
+assert row[4] == "benchmark"
+assert int(row[5]) == ranks
+assert int(row[6]) > 0
+
+runtime = float(row[7])
+residual = float(row[8])
+error = float(row[9])
+
+assert math.isfinite(runtime) and runtime > 0
+assert math.isfinite(residual) and 0 <= residual < 1e-8
+assert math.isfinite(error) and error >= 0
+
+assert int(row[10]) == 1
+assert row[15] == comm
+assert int(row[16]) == 0
+assert int(row[18]) == threads
+
+for index in (11, 12, 13, 14, 17):
+    value = float(row[index])
+    assert math.isfinite(value) and value >= 0
+
+print("MEASUREMENT VALIDATED")
+VALIDATE
+
+    printf '%s,%s,%s\n' "$row" "$phase" "$repeat" >> "$OUT"
+}
+
+echo "===== FORMAL EXPERIMENT ====="
+
+for case_spec in "2 512" "3 64"; do
+    read -r dim grid <<< "$case_spec"
+
+    for config in "16 1" "8 2" "4 4"; do
+        read -r ranks threads <<< "$config"
+
+        for comm in baseline overlap; do
+
+            run_case "$dim" "$grid" "$ranks" "$threads" "$comm" warmup 0
+
+            for repeat in 1 2 3 4 5; do
+                run_case "$dim" "$grid" "$ranks" "$threads" "$comm" measure "$repeat"
+            done
+
+        done
+    done
+done
+
+echo "===== OUTPUT ====="
+echo "$OUT"
+
+echo "===== ROW COUNT ====="
+wc -l "$OUT"
+
+ACTUAL_ROWS=$(wc -l < "$OUT")
+EXPECTED_ROWS=73
+
+if [ "$ACTUAL_ROWS" -ne "$EXPECTED_ROWS" ]; then
+    echo "ERROR: Expected $EXPECTED_ROWS rows, got $ACTUAL_ROWS"
+    exit 1
+fi
+
+echo "===== FINAL STATUS ====="
+echo "HYBRID FORMAL 16 COMPLETED"

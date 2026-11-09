@@ -1,0 +1,65 @@
+#!/bin/bash
+#PBS -N cg_C754_benchmark
+#PBS -q interactive_gpu
+#PBS -P personal-tianyimeng
+#PBS -l select=1:ncpus=4:ngpus=1:mem=16gb:node_pool=cpu_node
+#PBS -l walltime=01:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+cd "$PBS_O_WORKDIR"
+
+module load CUDA/12.4.0
+
+echo "===== BUILD GPU EXECUTABLE ====="
+make -j1 gpu
+test -x build/cg_gpu
+
+BASE_OUT="results/formal/gpu/benchmark"
+JOB_ID="${PBS_JOBID%%.*}"
+OUT="$BASE_OUT/$JOB_ID"
+JOB_OUT="$PBS_O_WORKDIR/$OUT"
+
+if [ -e "$JOB_OUT" ]; then
+    echo "ERROR: Output directory already exists: $JOB_OUT"
+    exit 1
+fi
+
+mkdir -p "$JOB_OUT"
+export CG_GPU_BENCHMARK_OUT="$JOB_OUT"
+
+
+LOG="$JOB_OUT/benchmark_${JOB_ID}.log"
+
+if [ -e "$LOG" ] || \
+   [ -e "$OUT/gpu_benchmark_raw.csv" ] || \
+   [ -e "$OUT/gpu_benchmark_summary.csv" ]; then
+    echo "ERROR: Existing benchmark output detected"
+    exit 1
+fi
+
+{
+    echo "===== C7.5 GPU FORMAL BENCHMARK ====="
+
+    echo "===== JOB ====="
+    echo "$PBS_JOBID"
+    hostname
+    date
+
+    echo "===== GPU ====="
+    nvidia-smi
+
+    echo "===== CUDA ====="
+    nvcc --version
+
+    echo "===== EXECUTABLE ====="
+    test -x build/cg_gpu
+
+    echo "===== BENCHMARK ====="
+    python3 -u tests/gpu/benchmark_gpu.py
+
+    echo "===== BENCHMARK COMPLETED ====="
+    date
+
+} 2>&1 | tee "$LOG"

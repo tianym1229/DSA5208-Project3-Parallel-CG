@@ -1,0 +1,105 @@
+#!/bin/bash
+#PBS -P personal-tianyimeng
+#PBS -N cg_C5_rec_E1
+#PBS -l select=8:ncpus=32:mpiprocs=32:ompthreads=1:mem=32gb:node_pool=cpu_node
+#PBS -l place=scatter
+#PBS -l walltime=00:40:00
+#PBS -j oe
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+MPI_PREFIX=/cm/shared/apps/openmpi4/gcc/4.1.8
+export PATH="$MPI_PREFIX/bin:$PATH"
+export LD_LIBRARY_PATH="$MPI_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+
+echo "===== BUILD EXECUTABLE ====="
+make -j1 cg_mpi
+test -x cg_mpi
+echo "===== BUILD COMPLETED ====="
+export OMP_NUM_THREADS=1
+export OMP_PLACES=cores
+export OMP_PROC_BIND=close
+
+OUTDIR="results/formal/mpi/weak_scaling/stepC5_weak_scaling_groupE_recovery_E1"
+mkdir -p "$OUTDIR"
+
+JOBID="${PBS_JOBID%%.*}"
+OUT="$OUTDIR/results_${JOBID}.csv"
+
+echo "dim,grid,n,nnz,solution,ranks,iterations,runtime_s,relative_residual,relative_error,converged,halo_s,spmv_s,allreduce_s,vector_s,comm,fixed_iters,validation_s,omp_threads,phase,repeat" > "$OUT"
+
+echo "===== WEAK SCALING GROUP E FORMAL ====="
+echo "===== NODE ALLOCATION ====="
+sort "$PBS_NODEFILE" | uniq -c
+
+run_case() {
+    local dim="$1"
+    local grid="$2"
+    local ranks="$3"
+    local comm="$4"
+    local phase="$5"
+    local repeat="$6"
+
+    echo "===== DIM=$dim GRID=$grid RANKS=$ranks COMM=$comm START ====="
+
+    mpirun \
+        --prefix "$MPI_PREFIX" \
+        --hostfile "$PBS_NODEFILE" \
+        --map-by ppr:32:node \
+        --bind-to core \
+        -np "$ranks" \
+        ./cg_mpi \
+        --dim "$dim" \
+        --grid "$grid" \
+        --solution benchmark \
+        --comm "$comm" \
+        --tol 1e-8 \
+        --max-iters 10000 \
+    | awk -F',' \
+        -v out="$OUT" \
+        -v expected_dim="$dim" \
+        -v expected_grid="$grid" \
+        -v expected_ranks="$ranks" \
+        -v expected_comm="$comm" \
+        -v phase="$phase" \
+        -v rep="$repeat" '
+        BEGIN { count=0; invalid=0 }
+
+        $1 ~ /^[23]$/ && NF==19 {
+            count++
+            if ($1 != expected_dim ||
+                $2 != expected_grid ||
+                $6 != expected_ranks ||
+                $7+0 <= 0 ||
+                $8+0 <= 0 ||
+                $9+0 >= 1e-8 ||
+                $11 != 1 ||
+                $16 != expected_comm ||
+                $19 != 1) {
+                invalid++
+            }
+            row=$0
+        }
+
+        END {
+            if (count != 1 || invalid != 0)
+                exit 1
+            print row "," phase "," rep >> out
+        }
+    '
+
+    echo "===== DIM=$dim GRID=$grid RANKS=$ranks COMM=$comm SUCCESS ====="
+}
+
+run_case 3 203 256 baseline warmup 0
+run_case 3 203 256 baseline measure 2
+run_case 3 203 256 baseline measure 3
+run_case 3 203 256 baseline measure 4
+run_case 3 203 256 baseline measure 5
+
+echo "===== CSV ROW COUNT ====="
+wc -l "$OUT"
+
+echo "===== WEAK SCALING GROUP E FORMAL COMPLETED ====="
+echo "CSV=$OUT"

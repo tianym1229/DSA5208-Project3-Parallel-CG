@@ -1,0 +1,98 @@
+#!/bin/bash
+#PBS -P personal-tianyimeng
+#PBS -N cg_C462_recheck256
+#PBS -l select=8:ncpus=32:mpiprocs=32:ompthreads=1:mem=32gb:node_pool=cpu_node
+#PBS -l place=scatter
+#PBS -l walltime=00:15:00
+#PBS -j oe
+
+set -euo pipefail
+
+cd "$PBS_O_WORKDIR"
+
+MPI_PREFIX=/cm/shared/apps/openmpi4/gcc/4.1.8
+export PATH="$MPI_PREFIX/bin:$PATH"
+export LD_LIBRARY_PATH="$MPI_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+
+echo "===== BUILD EXECUTABLE ====="
+make -j1 cg_mpi
+test -x cg_mpi
+echo "===== BUILD COMPLETED ====="
+export OMP_NUM_THREADS=1
+export OMP_PLACES=cores
+export OMP_PROC_BIND=close
+
+mkdir -p results/formal/mpi/strong_scaling/stepC462_256rank_recheck
+
+JOBID="${PBS_JOBID%%.*}"
+OUT="results/formal/mpi/strong_scaling/stepC462_256rank_recheck/results_${JOBID}.csv"
+
+echo "===== 256-RANK PAIRED PERFORMANCE TEST ====="
+
+echo "===== NODE ALLOCATION ====="
+sort "$PBS_NODEFILE" | uniq -c
+
+echo "===== MPI VERSION ====="
+mpirun --version | head -n 1
+
+echo "dim,grid,n,nnz,solution,ranks,iterations,runtime_s,relative_residual,relative_error,converged,halo_s,spmv_s,allreduce_s,vector_s,comm,fixed_iters,validation_s,omp_threads,phase,repeat" > "$OUT"
+
+run_case() {
+    local comm="$1"
+    local phase="$2"
+    local repeat="$3"
+
+    echo "===== COMM=$comm PHASE=$phase REPEAT=$repeat START ====="
+
+    mpirun \
+        --prefix "$MPI_PREFIX" \
+        --hostfile "$PBS_NODEFILE" \
+        --map-by ppr:32:node \
+        --bind-to core \
+        -np 256 \
+        ./cg_mpi \
+        --dim 2 \
+        --grid 512 \
+        --solution benchmark \
+        --comm "$comm" \
+        --tol 1e-8 \
+        --max-iters 10000 \
+    | awk -F',' -v out="$OUT" \
+        -v comm="$comm" \
+        -v phase="$phase" \
+        -v rep="$repeat" '
+        BEGIN { count=0; invalid=0 }
+
+        $1 ~ /^[23]$/ && NF==19 {
+            count++
+
+            if ($1!=2 || $2!=512 ||
+                $6!=256 || $7!=1062 ||
+                $11!=1 || $9+0>=1e-8 ||
+                $8+0<=0 || $16!=comm)
+                invalid++
+
+            row=$0
+        }
+
+        END {
+            if (count!=1 || invalid!=0) exit 1
+            print row "," phase "," rep >> out
+        }
+    '
+
+    echo "===== COMM=$comm PHASE=$phase REPEAT=$repeat SUCCESS ====="
+}
+
+# Warmup both communication modes
+run_case baseline warmup 0
+run_case overlap warmup 0
+
+# Balanced measurement order
+run_case baseline measure 1
+run_case overlap measure 1
+run_case overlap measure 2
+run_case baseline measure 2
+
+echo "===== STEP C4.5.5.13.10 CG RECHECK COMPLETED ====="
+echo "CSV=$OUT"

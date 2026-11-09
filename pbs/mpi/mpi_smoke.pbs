@@ -1,0 +1,43 @@
+#!/bin/bash
+#PBS -P personal-tianyimeng
+#PBS -N pfa_mpi_smoke
+#PBS -l select=1:ncpus=4:mpiprocs=4:ompthreads=1:mem=8gb:node_pool=cpu_node
+#PBS -l walltime=00:15:00
+#PBS -j oe
+
+set -euo pipefail
+
+cd "$PBS_O_WORKDIR"
+
+module load openmpi/gcc/64/4.1.8
+
+MPI_PREFIX=/cm/shared/apps/openmpi4/gcc/4.1.8
+export PATH="$MPI_PREFIX/bin:$PATH"
+export LD_LIBRARY_PATH="$MPI_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+
+export OMP_NUM_THREADS=1
+export OMP_DYNAMIC=FALSE
+export OMP_PLACES=cores
+export OMP_PROC_BIND=close
+
+OUT="$PBS_O_WORKDIR/results/analysis/mpi/smoke"
+mkdir -p "$OUT"
+
+echo "===== MPI CLEAN BUILD SMOKE TEST ====="
+echo "JOBID=$PBS_JOBID"
+echo "HOST=$(hostname)"
+echo "PROJECT_ROOT=$PBS_O_WORKDIR"
+echo "OMP_NUM_THREADS=$OMP_NUM_THREADS"
+
+echo "===== BUILD MPI AND SERIAL EXECUTABLES ====="
+make -j1 cg_serial cg_mpi
+
+echo "===== VERIFY EXECUTABLES ====="
+test -x cg_serial
+test -x cg_mpi
+ls -lh cg_serial cg_mpi
+
+echo "===== RUN MPI CORRECTNESS TESTS ====="
+python3 -u tests/test_mpi.py
+
+echo "===== MPI SMOKE TEST PASSED ====="

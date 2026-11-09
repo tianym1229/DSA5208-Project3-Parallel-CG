@@ -1,0 +1,103 @@
+#!/bin/bash
+#PBS -P personal-tianyimeng
+#PBS -N cg_C467_recheck32
+#PBS -l select=2:ncpus=16:mpiprocs=16:ompthreads=1:node_pool=cpu_node
+#PBS -l place=scatter
+#PBS -l walltime=00:15:00
+#PBS -j oe
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+MPI_PREFIX=/cm/shared/apps/openmpi4/gcc/4.1.8
+
+export PATH="$MPI_PREFIX/bin:$PATH"
+export LD_LIBRARY_PATH="$MPI_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+
+echo "===== BUILD EXECUTABLE ====="
+make -j1 cg_mpi
+test -x cg_mpi
+echo "===== BUILD COMPLETED ====="
+export OMP_NUM_THREADS=1
+export OMP_PROC_BIND=true
+export OMP_PLACES=cores
+
+OUTDIR="results/formal/mpi/strong_scaling/stepC467_32rank_baseline_recheck"
+mkdir -p "$OUTDIR"
+
+JOBID="${PBS_JOBID%%.*}"
+OUT="$OUTDIR/results_${JOBID}.csv"
+
+echo "dim,grid,n,nnz,solution,ranks,iterations,runtime_s,relative_residual,relative_error,converged,halo_s,spmv_s,allreduce_s,vector_s,comm,fixed_iters,validation_s,omp_threads,phase,repeat" > "$OUT"
+
+echo "===== NODE ALLOCATION ====="
+sort "$PBS_NODEFILE" | uniq -c
+
+echo "===== MPI VERSION ====="
+mpirun --version | head -n 1
+
+run_case() {
+    local phase="$1"
+    local repeat="$2"
+
+    echo "===== PHASE=$phase REPEAT=$repeat START ====="
+
+    mpirun \
+        --prefix "$MPI_PREFIX" \
+        --hostfile "$PBS_NODEFILE" \
+        --map-by ppr:16:node \
+        --bind-to core \
+        -np 32 \
+        ./cg_mpi \
+        --dim 2 \
+        --grid 512 \
+        --solution benchmark \
+        --comm baseline \
+        --tol 1e-8 \
+        --max-iters 10000 \
+    | awk -F',' \
+        -v out="$OUT" \
+        -v phase="$phase" \
+        -v rep="$repeat" '
+        BEGIN {
+            count=0
+            invalid=0
+        }
+
+        $1==2 && NF==19 {
+            count++
+
+            if ($2!=512 || $6!=32 ||
+                $11!=1 || $19!=1 ||
+                $16!="baseline" ||
+                $9+0>=1e-8 ||
+                $8+0<=0) {
+                invalid=1
+            }
+
+            row=$0
+        }
+
+        END {
+            if (count!=1 || invalid!=0)
+                exit 1
+
+            print row "," phase "," rep >> out
+        }
+    '
+
+    echo "===== PHASE=$phase REPEAT=$repeat SUCCESS ====="
+}
+
+echo "===== WARMUP ====="
+run_case warmup 0
+
+echo "===== FORMAL MEASUREMENTS ====="
+
+for repeat in 1 2 3 4 5; do
+    run_case measure "$repeat"
+done
+
+echo "===== EXPERIMENT COMPLETED ====="
+echo "CSV=$OUT"
+wc -l "$OUT"

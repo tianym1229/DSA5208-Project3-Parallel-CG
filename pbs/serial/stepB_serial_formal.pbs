@@ -1,0 +1,71 @@
+#!/bin/bash
+#PBS -P personal-tianyimeng
+#PBS -N cg_serial_formal
+#PBS -l select=1:ncpus=1:mpiprocs=1:mem=8gb
+#PBS -l walltime=00:20:00
+#PBS -j oe
+
+set -euo pipefail
+
+cd "$PBS_O_WORKDIR"
+
+echo "===== BUILD EXECUTABLE ====="
+make -j1 cg_serial
+test -x cg_serial
+echo "===== BUILD COMPLETED ====="
+
+mkdir -p results/formal/serial/stepB_serial_formal
+
+OUT="results/formal/serial/stepB_serial_formal/results_${PBS_JOBID%%.*}.csv"
+
+echo "dim,grid,n,nnz,solution,iterations,runtime_s,relative_residual,relative_error,converged,repeat" > "$OUT"
+
+echo "===== SERIAL FORMAL BENCHMARK ====="
+hostname
+date
+
+for case in \
+    "2 64" \
+    "2 128" \
+    "2 256" \
+    "2 512" \
+    "2 768" \
+    "3 16" \
+    "3 32" \
+    "3 40" \
+    "3 64" \
+    "3 80"
+do
+    read -r dim grid <<< "$case"
+
+    for repeat in 1 2 3 4 5
+    do
+        echo "===== CASE dim=$dim grid=$grid repeat=$repeat ====="
+
+        ./cg_serial \
+            --dim "$dim" \
+            --grid "$grid" \
+            --solution benchmark \
+            --tol 1e-8 \
+            --max-iters 10000 \
+        | awk -F, -v out="$OUT" -v rep="$repeat" '
+            $1 ~ /^[23]$/ {
+                count++
+                if (NF != 10 ||
+                    $10 != 1 ||
+                    $7 <= 0 ||
+                    $8 >= 1e-8) {
+                    invalid=1
+                }
+                row=$0
+            }
+            END {
+                if (count != 1 || invalid) exit 1
+                print row "," rep >> out
+            }
+        '
+    done
+done
+
+echo "===== SERIAL FORMAL BENCHMARK COMPLETED ====="
+echo "CSV=$OUT"

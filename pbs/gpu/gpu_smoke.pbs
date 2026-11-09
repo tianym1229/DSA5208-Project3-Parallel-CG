@@ -1,0 +1,48 @@
+#!/bin/bash
+#PBS -N pfa_gpu_smoke
+#PBS -q interactive_gpu
+#PBS -P personal-tianyimeng
+#PBS -l select=1:ncpus=4:ngpus=1:mem=16gb:node_pool=cpu_node
+#PBS -l walltime=00:20:00
+#PBS -j oe
+
+set -euo pipefail
+
+cd "$PBS_O_WORKDIR"
+
+module load CUDA/12.4.0
+
+ROOT="$PBS_O_WORKDIR"
+EXE="$ROOT/build/cg_gpu"
+
+echo "===== GPU CLEAN BUILD SMOKE TEST ====="
+
+echo "===== PBS JOB ====="
+echo "$PBS_JOBID"
+
+echo "===== HOST ====="
+hostname
+
+echo "===== PROJECT ROOT ====="
+echo "$ROOT"
+
+echo "===== GPU INFORMATION ====="
+nvidia-smi
+
+echo "===== CUDA VERSION ====="
+nvcc --version
+
+echo "===== BUILD GPU EXECUTABLE ====="
+make gpu
+
+echo "===== VERIFY GPU EXECUTABLE ====="
+test -x "$EXE"
+ls -lh "$EXE"
+
+echo "===== GPU DEPENDENCIES ====="
+ldd "$EXE" | grep -E 'cublas|cusparse|not found'
+
+echo "===== GPU CORRECTNESS TESTS ====="
+python3 -u tests/gpu/test_gpu_correctness.py
+
+echo "===== GPU SMOKE TEST PASSED ====="

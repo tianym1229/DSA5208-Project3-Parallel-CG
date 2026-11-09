@@ -1,0 +1,61 @@
+#!/bin/bash
+#PBS -N cg_C742_correctness
+#PBS -q interactive_gpu
+#PBS -P personal-tianyimeng
+#PBS -l select=1:ncpus=4:ngpus=1:mem=16gb:node_pool=cpu_node
+#PBS -l walltime=00:20:00
+#PBS -j oe
+
+set -euo pipefail
+
+cd "$PBS_O_WORKDIR"
+
+module load CUDA/12.4.0
+
+echo "===== BUILD GPU EXECUTABLE ====="
+make -j1 gpu
+test -x build/cg_gpu
+
+BASE_OUT="results/formal/gpu/correctness"
+JOB_ID="${PBS_JOBID%%.*}"
+OUT="$BASE_OUT/$JOB_ID"
+JOB_OUT="$PBS_O_WORKDIR/$OUT"
+
+if [ -e "$JOB_OUT" ]; then
+    echo "ERROR: Output directory already exists: $JOB_OUT"
+    exit 1
+fi
+
+mkdir -p "$JOB_OUT"
+export CG_GPU_CORRECTNESS_OUT="$JOB_OUT"
+
+
+LOG="$JOB_OUT/correctness_${JOB_ID}.log"
+
+{
+    echo "===== STEP C7.4.2 GPU CORRECTNESS ====="
+
+    echo "===== PBS JOB ====="
+    echo "$PBS_JOBID"
+
+    echo "===== HOST ====="
+    hostname
+
+    echo "===== GPU ====="
+    nvidia-smi
+
+    echo "===== CUDA VERSION ====="
+    nvcc --version
+
+    echo "===== EXECUTABLE ====="
+    test -x build/cg_gpu
+    ls -lh build/cg_gpu
+
+    echo "===== GPU CORRECTNESS TESTS ====="
+    python3 -u tests/gpu/test_gpu_correctness.py
+
+    echo "===== TESTS COMPLETED ====="
+
+} 2>&1 | tee "$LOG"
+
+echo "===== STEP C7.4.2 COMPLETED ====="
